@@ -86,6 +86,16 @@ sudo pip3 install opencv-python==4.5.5.64 opencv-contrib-python
 cd <project_directory>
 python Interface.py
 ```
+## User Interface (Screenshots)
+
+### After launching the application:
+
+![Startup](screenshot1.png)
+
+### After pieces are loaded on the board:
+
+![Board Loaded](screenshot2.png)
+
 
 ## Authors
 
