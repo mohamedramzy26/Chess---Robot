@@ -1,4 +1,4 @@
-import FreeSimpleGUI as sg
+import PySimpleGUI as sg
 import ChessLogic as cl
 import time
 import os
@@ -7,17 +7,19 @@ import threading
 import time
 import cv2
 import sys
+from picamera2 import Picamera2 
+from libcamera import Transform
 import json
 import VisionModule as vm
 import platform
 import ArmControl as ac
-import lss_const as lssc
 import pygame
 import pathlib
+import serial
 
 try:
     from picamera.array import PiRGBArray
-    from picamera import PiCamera
+    from picamera2 import PiCamera2
 except:
     pass
     
@@ -34,6 +36,9 @@ Dark
 #   GLOBAL VARIABLES
 
 CHESS_PATH = 'pieces_images'  # path to the chess pieces
+wclock = os.getcwd() + '/interface_images/wclock.png'
+bclock = os.getcwd() + '/interface_images/bclock.png'
+FENCODE = ""
 
 BLANK = 0  # piece names
 PAWNW = 1
@@ -96,7 +101,47 @@ physicalParams = {"baseradius": 0.00,
                     "sqSize": 0.00,
                     "cbHeight": 0.00,
                     "pieceHeight": 0.00}
+ 
 
+def executeMove(move, params, color, homography, cap, selectedCam):
+    z = params["cbHeight"] + params["pieceHeight"]
+    angles_rest = [60, 180, 5, 100, 10, 20]
+    gClose = 45
+    gOpen = 90
+    goDown = 0.6 * params["pieceHeight"]
+    gripState = gOpen
+    x, y = 0, 0
+
+    for i in range(0, len(move), 2):
+        x0, y0 = x, y
+        x, y = ac.CBtoXY((move[i], move[i+1]), params, color)
+
+        angles1 = ac.simple_IK([x, y, z + 1, gripState])
+        ac.send_angles_to_arduino(angles1)
+        time.sleep(0.8)
+
+        angles2 = ac.simple_IK([x, y, z - 1 - goDown, gripState])
+        ac.send_angles_to_arduino(angles2)
+        time.sleep(0.8)
+
+        gripState = gClose if ((i // 2) % 2 == 0) else gOpen
+        goDown = 0.5 * params["pieceHeight"] if gripState == gClose else 0.6 * params["pieceHeight"]
+        angles2[4] = gripState
+        ac.send_angles_to_arduino(angles2)
+        time.sleep(0.5)
+
+        angles3 = ac.simple_IK([x, y, z + 1, gripState])
+        ac.send_angles_to_arduino(angles3)
+        time.sleep(0.8)
+
+    ac.send_angles_to_arduino(angles_rest)
+    return True
+
+                    
+def setup_serial():
+    ser = serial.Serial('/dev/ttyACM0', 9600, timeout=1)
+    ser.flush()
+    
 def systemConfig():
     global chessRoute
 
@@ -134,7 +179,7 @@ def pcTurn(board,engine):
         speakThread.start()
         
     command = ""
-    ac.executeMove(sequence["seq"], physicalParams, playerColor, homography, cap, selectedCam)
+    executeMove(sequence["seq"], physicalParams, playerColor, homography, cap, selectedCam)
     board.push(pcMove.move)
     updateBoard(sequence, board)
     if board.is_checkmate():
@@ -163,39 +208,44 @@ def startEngine():
     else:
         state = "pcTurn"
 
-def playerTurn(board,squares):
+def playerTurn(board, squares):
+    print("[INFO] Player turn triggered")
     result = cl.moveAnalysis(squares, board)
+    print("[DEBUG] moveAnalysis result:", result)
     piece = ""
     if result:
         if result["type"] == "Promotion":
             while not piece:
                 piece = coronationWindow()
             result["move"] += piece
-            
         sequence = cl.sequenceGenerator(result["move"], board)
-        window.FindElement(key = "gameMessage").Update(sequence["type"])
+        print("[INFO] Executing move:", result["move"])
+        window.FindElement(key="gameMessage").Update(sequence["type"])
         board.push_uci(result["move"])
-        updateBoard(sequence,board)
+        updateBoard(sequence, board)
         return True
     else:
+        print("[WARNING] No valid result from moveAnalysis.")
         return False
+        
 
 def startGame():
     global gameTime
-    window.FindElement("newGame").Update(disabled=True)
-    window.FindElement("quit").Update(disabled=False)
-    window.FindElement(key = "wcount").Update(time.strftime("%H:%M:%S", time.gmtime(gameTime)))
-    window.FindElement(key = "bcount").Update(time.strftime("%H:%M:%S", time.gmtime(gameTime)))
-    window.FindElement(key = "clockButton").Update(image_filename=wclock)
-    window.FindElement(key = "robotMessage").Update("Good Luck!")
-    window.FindElement(key = "gameMessage").Update("--")
-
+    window["newGame"].Update(disabled=True)
+    window["quit"].Update(disabled=False)
+    window["wcount"].Update(time.strftime("%H:%M:%S", time.gmtime(gameTime)))
+    window["bcount"].Update(time.strftime("%H:%M:%S", time.gmtime(gameTime)))
+    window["clockButton"].Update(image_filename=wclock)
+    window["robotMessage"].Update("Good Luck!")
+    window["gameMessage"].Update("--")
+    
 def quitGame():
-    window.FindElement("newGame").Update(disabled=False)
-    window.FindElement("quit").Update(disabled=True)
-    engine.quit()
+    try:
+        engine.quit()
+    except:
+        pass
 
-#   INTERFACE FUNCTIONS
+
 
 def renderSquare(image, key, location):
     if (location[0] + location[1]) % 2:
@@ -212,11 +262,11 @@ def redrawBoard(board):
     if playerColor:
         sq = 63
         for i in range(8):
-            window.FindElement(key = str(8-i)+"r").Update("   "+str(8-i))
-            window.FindElement(key = str(8-i)+"l").Update(str(8-i)+"   ")
+            window[str(8-i)+"r"].Update("   "+str(8-i))
+            window[str(8-i)+"l"].Update(str(8-i)+"   ")
             for j in range(8):
-                window.FindElement(key = columns[j]+"t").Update(columns[j])
-                window.FindElement(key = columns[j]+"b").Update(columns[j])    
+                window[columns[j]+"t"].Update(columns[j])
+                window[columns[j]+"b"].Update(columns[j])    
                 color = blackSquareColor if (i + 7-j) % 2 else whiteSquareColor
                 pieceNum = board.piece_type_at(sq)
                 if pieceNum:
@@ -225,18 +275,18 @@ def redrawBoard(board):
                 else:
                     pieceNum = 0
                 piece_image = images[pieceNum]
-                elem = window.FindElement(key=(i, 7-j))
+                elem = window[(i, 7-j)]
                 elem.Update(button_color=('white', color),
                             image_filename=piece_image, )
                 sq -= 1
     else:
         sq = 0
         for i in range(8):
-            window.FindElement(key = str(8-i)+"r").Update("   "+str(i+1))
-            window.FindElement(key = str(8-i)+"l").Update(str(i+1)+"   ")
+            window[str(8-i)+"r"].Update("   "+str(i+1))
+            window[str(8-i)+"l"].Update(str(i+1)+"   ")
             for j in range(8):
-                window.FindElement(key = columns[j]+"t").Update(columns[7-j])
-                window.FindElement(key = columns[j]+"b").Update(columns[7-j]) 
+                window[columns[j]+"t"].Update(columns[7-j])
+                window[columns[j]+"b"].Update(columns[7-j]) 
                 color = blackSquareColor if (i + 7-j) % 2 else whiteSquareColor
                 pieceNum = board.piece_type_at(sq)
                 if pieceNum:
@@ -245,7 +295,7 @@ def redrawBoard(board):
                 else:
                     pieceNum = 0
                 piece_image = images[pieceNum]
-                elem = window.FindElement(key=(i, 7-j))
+                elem = window[(i, 7-j)]
                 elem.Update(button_color=('white', color),
                             image_filename=piece_image, )
                 sq += 1
@@ -262,9 +312,9 @@ def updateBoard(move, board):
         x = 7 - cl.chess.square_rank(scNum)
         color = blackSquareColor if (x + y) % 2 else whiteSquareColor
         if playerColor:
-            elem = window.FindElement(key=(x, y))
+            elem = window[(x, y)]
         else:
-            elem = window.FindElement(key=(7-x, 7-y))
+            elem = window[(7-x, 7-y)]
         elem.Update(button_color=('white', color),
                     image_filename=blank, )  
 
@@ -277,9 +327,9 @@ def updateBoard(move, board):
             x = 7 - cl.chess.square_rank(soNum)
             color = blackSquareColor if (x + y) % 2 else whiteSquareColor
             if playerColor:
-                elem = window.FindElement(key=(x, y))
+                elem = window[(x, y)]
             else:
-                elem = window.FindElement(key=(7-x, 7-y))    
+                elem = window[(7-x, 7-y)]    
             elem.Update(button_color=('white', color),
                         image_filename=images[pieceNum], )         
 
@@ -353,7 +403,7 @@ def ocupiedBoard(): # gameState: ocupiedBoard
             frame = takePIC()
             prevIMG = vm.applyHomography(frame,homography)
             imgbytes = cv2.imencode('.png', prevIMG)[1].tobytes()
-            newGameWindow.FindElement('boardVideo').Update(data=imgbytes)
+            newGameWindow['boardVideo'].Update(data=imgbytes)
 
         if button == "Next":
             newGameState = "sideConfig"
@@ -390,13 +440,13 @@ def calibration(): # gameState: calibration
         if detected:    
             frame = takePIC()
             imgbytes = cv2.imencode('.png', frame)[1].tobytes()  
-            newGameWindow.FindElement('boardVideo').Update(data=imgbytes)
+            newGameWindow['boardVideo'].Update(data=imgbytes)
             homography = []
             retIMG, homography = vm.findTransformation(frame,cbPattern)
             if retIMG:
-                newGameWindow.FindElement('calibrationBoard').Update("Camera calibration successful. Please press Next")
+                newGameWindow['calibrationBoard'].Update("Camera calibration successful. Please press Next")
             else:
-                newGameWindow.FindElement('calibrationBoard').Update("Please adjust your camera and remove any chess piece")
+                newGameWindow['calibrationBoard'].Update("Please adjust your camera and remove any chess piece")
 
         if button == "Next" and retIMG:
             newGameState = "ocupiedBoard"
@@ -505,33 +555,41 @@ def takePIC():
     if selectedCam:
         for i in range(5):                    # Clear images stored in buffer
             cap.grab()
-        _ , frame = cap.read()                # USB Cam
+        _ , frame =cap.capture_array()                # USB Cam
     else:
-        cap.capture(rawCapture, format="bgr") # RPi Cam
-        frame = rawCapture.array
-        rawCapture.truncate(0)                # Clear the stream in preparation for the next image
+       # cap.capture(rawCapture, format="bgr") # RPi Cam
+        frame = cap.capture_array()
+       # rawCapture.truncate(0)                # Clear the stream in preparation for the next image
     
     return frame
 
-def quitGameWindow ():
+def quitGameWindow():
     global playing
     global window
     global cap
-    windowName = "Quit Game"
-    quitGame = [[sg.Text('Are you sure?',justification='center', size=(30, 1), font='Any 13')], [sg.Submit("Yes",  size=(15, 1)),sg.Submit("No", size=(15, 1))]]
+
     if not selectedCam:
         cap.close()
+
     if playing:
+        windowName = "Quit Game"
+        quitGame = [[sg.Text('Are you sure?', justification='center', size=(30, 1), font='Any 13')],
+                    [sg.Submit("Yes", size=(15, 1)), sg.Submit("No", size=(15, 1))]]
+
+        windowNewGame = sg.Window(windowName, default_button_element_size=(12, 1), auto_size_buttons=False,
+                                  icon='interface_images/robot_icon.ico').Layout(quitGame)
+
         while True:
-            windowNewGame = sg.Window(windowName, default_button_element_size=(12,1), auto_size_buttons=False, icon='interface_images/robot_icon.ico').Layout(quitGame)
-            button,value = windowNewGame.Read()
+            button, value = windowNewGame.Read()
             if button == "Yes":
                 playing = False
                 break
-            if button in (None, 'Exit', "No"): # MAIN WINDOW
-                break   
-    windowNewGame.close()   
+            if button in (None, 'Exit', "No"):
+                break
 
+        windowNewGame.close()
+  
+    
 def mainBoardLayout():
     # ------ Menu Definition ------ #      
     menu_def = [['&Configuration',["&Dimensions","E&xit"]],      
@@ -539,7 +597,7 @@ def mainBoardLayout():
 
     # ------ Layout ------ # 
     # sg.SetOptions(margins=(0,0))
-    sg.ChangeLookAndFeel('Dark')
+    sg.theme('Dark')
     # Main board display layout
     board_layout = [[sg.T(' '*12)] + [sg.T('{}'.format(a), pad=((0,47),0), font='Any 13', key = a+'t') for a in 'abcdefgh']]
     # Loop though board and create buttons with images
@@ -560,6 +618,7 @@ def mainBoardLayout():
                 [sg.Button('---', size=(14, 2), border_width=0,  font=('courier', 16), button_color=('black', "white"), pad=(4, 4), key="robotMessage")],
                 ]
     board_controls = [[sg.RButton('New Game', key='newGame', size=(15, 2), pad=(0,(0,7)), font=('courier', 16))],
+                        [sg.Button('تحكم يدوي', key='manualControl', size=(15, 2), font=('courier', 16))],
                         [sg.RButton('Quit', key='quit', size=(15, 2), pad=(0, 0), font=('courier', 16), disabled = True)],
                         [sg.Frame('GAME', frame_layout_game, pad=(0, 10), font='Any 12', title_color='white', key = "frameMessageGame")],
                         [sg.Frame('ROBOT', frame_layout_robot, pad=(0, (0,10)), font='Any 12', title_color='white', key = "frameMessageRobot")],
@@ -572,27 +631,32 @@ def mainBoardLayout():
 
     return layout
 
+    
+    
 def initCam(selectedCam):
     global detected
     global rawCapture
 
     button, value = window.Read(timeout=10)
-    if selectedCam: # USB Cam
+
+    if selectedCam:  # USB Cam
         cap = cv2.VideoCapture(selectedCam - 1)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT,480)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         if not cap.isOpened():
             detected = False  
             sg.popup_error('USB Video device not found')
-    else:           # RPi Cam
-        cap = PiCamera()
-        if not cap:
-            detected = False    
-            sg.popup_error('RPi camera module not found')
-        else:
-            cap.resolution = (640, 480)
-            rawCapture = PiRGBArray(cap, size=(640, 480))
+    else:  # RPi Cam using picamera2
+        cap = Picamera2()
+        cap.preview_configuration.main.size = (640, 480)
+        cap.preview_configuration.main.format = "RGB888"
+        cap.preview_configuration.transform = Transform(hflip=1, vflip=1)
+        cap.configure("preview")
+        cap.start()
+    
     return cap
+    
+
 
 def loadParams():
     global physicalParams
@@ -644,73 +708,62 @@ def speak(command):
     pygame.mixer.music.load(filePath+command+".mp3")
     pygame.mixer.music.play()
 
+
 def main():
-    global playerColor
-    global state
-    global playing
-    global sequence
-    global newGameState
-    global detected
-    global physicalParams
-    global moveState
-    global prevIMG
-    global rotMat
-    global homography
-    global colorTurn
+    global playerColor, state, playing, sequence, newGameState, detected
+    global physicalParams, prevIMG, rotMat, homography, colorTurn
 
     systemConfig()
     loadParams()
-    interfaceMessage = ""
     board = cl.chess.Board()
     squares = []
     whiteTime = 0
     blackTime = 0
     refTime = time.time()
-    board = cl.chess.Board()
 
-    while True :
+    while True:
         button, value = window.Read(timeout=100)
 
-        if button in (None, 'Exit') or value["manubar"]=="Exit": # MAIN WINDOW
-            angles_rest = (0,-1150,450,1100,0)
-            _ = ac.LSSA_moveMotors(angles_rest)
-            ac.allMotors.limp()
-            ac.allMotors.setColorLED(lssc.LSS_LED_Black)
+        if button in (None, 'Exit') or value.get("manubar") == "Exit":
+            angles_rest = [0, 0, 0, 0, 0, 0]
+            ac.send_angles_to_arduino(angles_rest)
             break
 
-        if value["manubar"]=="Dimensions":
+        if button == "manualControl":
+            manual_control_window()
+
+        if value.get("manubar") == "Dimensions":
             if playing:
                 sg.popup("Please, first quit the game")
             else:
                 phisicalConfig()
 
-        if button =="newGame":
-            if physicalParams["baseradius"] and physicalParams["cbFrame"] and physicalParams["sqSize"] and physicalParams["cbHeight"] and physicalParams["pieceHeight"]: 
+        if button == "newGame":
+            if all(physicalParams.values()):
                 state = "startMenu"
             else:
-                sg.popup_error('Please configure the chess board dimensions in the Configuration option of menu bar')
+                sg.popup_error("Please configure the chess board dimensions first")
 
-        if button =="quit":
-            ac.allMotors.setColorLED(lssc.LSS_LED_Black)
+        if button == "quit":
             quitGameWindow()
             if not playing:
                 state = "showGameResult"
 
-        # PC messages
+        # انتهاء الوقت
         if playing:
-            if  whiteTime <= 0:
+            if whiteTime <= 0:
                 playing = False
                 state = "showGameResult"
-                window.FindElement(key = "gameMessage").Update("Time Out\n"+"Black Wins")
-            elif  blackTime <= 0:
+                window["gameMessage"].Update("Time Out\nBlack Wins")
+            elif blackTime <= 0:
                 playing = False
                 state = "showGameResult"
-                window.FindElement(key = "gameMessage").Update("Time Out\n"+ "White Wins")
+                window["gameMessage"].Update("Time Out\nWhite Wins")
 
-        if state == "stby": # stby
+        if state == "stby":
             pass
 
-        elif state == "startMenu": # Start Menu
+        elif state == "startMenu":
             if newGameState == "config":
                 newGameWindow()
             elif newGameState == "calibration":
@@ -722,25 +775,21 @@ def main():
             elif newGameState == "initGame":
                 playing = True
                 newGameState = "config"
-                board = cl.chess.Board()
-                if FENCODE:
-                    board = cl.chess.Board(FENCODE)
+                board = cl.chess.Board(FENCODE) if FENCODE else cl.chess.Board()
                 colorTurn = board.turn
                 startGame()
-                whiteTime = gameTime
-                blackTime = gameTime
+                whiteTime = blackTime = gameTime
                 refTime = time.time()
-                startEngineThread = threading.Thread(target=startEngine, daemon=True)
-                startEngineThread.start()
+                threading.Thread(target=startEngine, daemon=True).start()
                 speak("good_luck")
                 state = "stby"
                 redrawBoard(board)
 
-        elif state == "playerTurn": # Player Turn
+        elif state == "playerTurn":
             if button == "clockButton":
                 currentIMG = takePIC()
-                curIMG = vm.applyHomography(currentIMG,homography)
-                curIMG = vm.applyRotation(curIMG,rotMat)
+                curIMG = vm.applyHomography(currentIMG, homography)
+                curIMG = vm.applyRotation(curIMG, rotMat)
                 squares = vm.findMoves(prevIMG, curIMG)
                 if playerTurn(board, squares):
                     state = "pcTurn"
@@ -748,72 +797,52 @@ def main():
                         playing = False
                         state = "showGameResult"
                 else:
-                    window.FindElement(key = "gameMessage").Update("Invalid move!")
+                    window["gameMessage"].Update("Invalid move!")
                     speak("invalid_move")
                     state = "playerTurn"
-        
-        elif state == "pcTurn": # PC turn
-            
-            if board.turn:
-                window.FindElement(key = "clockButton").Update(image_filename=wclock)
-            else:
-                window.FindElement(key = "clockButton").Update(image_filename=bclock)
-                
-            pcTurnThread = threading.Thread(target=pcTurn, args=(board,engine,), daemon=True)
-            pcTurnThread.start()
-            state = "stby"         # Wait for the PC move, thread changes the state
 
-        elif state == "robotMove": # Robotic arm turn
+        elif state == "pcTurn":
+            window["clockButton"].Update(image_filename=wclock if board.turn else bclock)
+            threading.Thread(target=pcTurn, args=(board, engine,), daemon=True).start()
+            state = "stby"
+
+        elif state == "robotMove":
             previousIMG = takePIC()
-            prevIMG = vm.applyHomography(previousIMG,homography)
-            prevIMG = vm.applyRotation(prevIMG,rotMat)
+            prevIMG = vm.applyHomography(previousIMG, homography)
+            prevIMG = vm.applyRotation(prevIMG, rotMat)
             state = "playerTurn"
-            window.FindElement(key = "robotMessage").Update("---")
-            if board.turn:
-                window.FindElement(key = "clockButton").Update(image_filename=wclock)
-            else:
-                window.FindElement(key = "clockButton").Update(image_filename=bclock)
+            window["robotMessage"].Update("---")
+            window["clockButton"].Update(image_filename=wclock if board.turn else bclock)
 
         elif state == "showGameResult":
-            gameResult = board.result()
-            if gameResult == "1-0":
-                window.FindElement(key = "gameMessage").Update("Game Over" + "\nWhite Wins")
-                if not playerColor:    # If the player color is black -> robot color is white
-                    ac.winLED(ac.allMotors)
-                else:
-                    speak("goodbye")
-            elif gameResult == "0-1":
-                window.FindElement(key = "gameMessage").Update("Game Over" + "\nBlack Wins")
-                if playerColor:        # If the player color is white -> robot color is black
-                    ac.winLED(ac.allMotors)
-                else:
-                    speak("goodbye")
-            elif gameResult == "1/2-1/2":
-                window.FindElement(key = "gameMessage").Update("Game Over" + "\nDraw")
+            result = board.result()
+            msg = "Game Over\n"
+            if result == "1-0":
+                msg += "White Wins"
+            elif result == "0-1":
+                msg += "Black Wins"
+            elif result == "1/2-1/2":
+                msg += "Draw"
             else:
-                window.FindElement(key = "gameMessage").Update("Game Over")
-            window.FindElement(key = "robotMessage").Update("Goodbye")
+                msg += "Unknown Result"
+            window["gameMessage"].Update(msg)
+            window["robotMessage"].Update("Goodbye")
+            speak("goodbye")
             quitGame()
             state = "stby"
-            
+
         if playing:
             dt = time.time() - refTime
+            refTime = time.time()
             if board.turn:
-                whiteTime = whiteTime - dt
-                if whiteTime < 0:
-                    whiteTime = 0
-                refTime = time.time()
-                window.FindElement(key = "wcount").Update(time.strftime("%H:%M:%S", time.gmtime(whiteTime)))
+                whiteTime = max(0, whiteTime - dt)
+                window["wcount"].Update(time.strftime("%H:%M:%S", time.gmtime(whiteTime)))
             else:
-                blackTime = blackTime - dt
-                if blackTime < 0:
-                    blackTime = 0
-                refTime = time.time()
-                window.FindElement(key = "bcount").Update(time.strftime("%H:%M:%S", time.gmtime(blackTime)))
+                blackTime = max(0, blackTime - dt)
+                window["bcount"].Update(time.strftime("%H:%M:%S", time.gmtime(blackTime)))
 
-    window.close() 
-    
+    window.close()
 
-if __name__ == "__main__":
-    main()
+
+if __name__ == "__main__":main()
 
